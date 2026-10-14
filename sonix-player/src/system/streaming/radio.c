@@ -1626,6 +1626,13 @@ static radio_now_t now_state;
 static unsigned now_serial;
 static radio_station_t now_station;
 
+// Why the last connection attempt on the playing thread failed, when HTTP
+// could say (a name that would not resolve, a refused connection, a
+// certificate that would not verify -- the clock ones above all). Written and
+// read on that thread alone. The generic "unreachable" only goes up when even
+// this has nothing to offer.
+static char play_error[192];
+
 // The transport, and the rule that keeps it single-writer.
 //
 // Every start gets a generation number. The playing thread carries its own and
@@ -2353,7 +2360,6 @@ done_hls:
 	return true;
 }
 
-
 // Decodes one connection's worth of stream. Returns true if it ended cleanly
 // or was stopped, false if it broke and is worth reconnecting.
 static bool play_one_connection(const char *url, unsigned mine, char *redirect, size_t redirect_size,
@@ -2362,6 +2368,13 @@ static bool play_one_connection(const char *url, unsigned mine, char *redirect, 
 
 	http_stream_t stream;
 	if (!http_stream_open(&stream, url, 10)) {
+		// Keep the reason HTTP gave, if it gave one: a certificate that will not
+		// verify, a name that will not resolve or a refused connection are all
+		// things the user can act on, and "Station unreachable" is not.
+		const char *why = http_last_error();
+		if (why && why[0]) {
+			snprintf(play_error, sizeof(play_error), "%s", why);
+		}
 		return false;
 	}
 
@@ -2699,6 +2712,7 @@ static void *play_main(void *arg) {
 	char url[RADIO_URL_MAX];
 	char favicon[RADIO_URL_MAX];
 	char uuid[40];
+	play_error[0] = '\0';
 	pthread_mutex_lock(&now_lock);
 	snprintf(url, sizeof(url), "%s", now_station.url);
 	snprintf(favicon, sizeof(favicon), "%s", now_station.favicon);
@@ -2779,7 +2793,11 @@ static void *play_main(void *arg) {
 	if (still_mine(mine)) {
 		pthread_mutex_lock(&now_lock);
 		if (!now_state.playing && !now_state.error[0]) {
-			snprintf(now_state.error, sizeof(now_state.error), "%s", tr("radio_station_unreachable"));
+			// The real reason when HTTP could name one (a bad clock making every
+			// certificate invalid, a missing CA bundle, a name that does not
+			// resolve), and the generic line only when it could not.
+			snprintf(now_state.error, sizeof(now_state.error), "%s",
+					 play_error[0] ? play_error : tr("radio_station_unreachable"));
 		}
 		now_state.playing = false;
 		now_state.connecting = false;
